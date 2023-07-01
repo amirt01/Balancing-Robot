@@ -27,9 +27,9 @@ public:
   void run(void) {
     currentTime = micros();
     if (!enable) return;  // exit if dissabled
-    else if (!togglePulse && (currentTime - lastPulseTime))  // low pulse for only 1 microsecond
+    else if (!togglePulse && (currentTime - lastPulseTime) >= 1)  // low pulse for only 1 microsecond
       togglePulse = HIGH;
-    else if (togglePulse && (currentTime - lastPulseTime) > stepTime)  // high pulse for step durration
+    else if (togglePulse && (currentTime - lastPulseTime) >= stepTime)  // high pulse for step durration
       togglePulse = LOW;
     else return;  // return if not ready for a pulse
 
@@ -230,12 +230,12 @@ double ComputePID(double& calculatedAngle) {
   prevTime = currTime;  // update prevTime to currTime
 
   // PID constants
-  static const double Kp = 12.0;
-  static const double Ki = 0.0;
-  static const double Kd = -0.0;
+  static const double Kp = 20.0;
+  static const double Ki = 6.0;
+  static const double Kd = -0.01;
 
   // Target angles
-  static const double targetAngle = -4;
+  static const double targetAngle = -3.5;
 
   // Variables for PID control
   static double previousError = 0.0;
