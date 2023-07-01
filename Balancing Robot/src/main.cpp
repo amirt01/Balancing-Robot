@@ -30,27 +30,44 @@ public:
     currentTime = micros();
     digitalWrite(dirPin, direction);
     if (!enable) return;
-    if ((currentTime - deltaTime) > stepTime) {
+    if ((currentTime - lastPulseTime) > stepTime) {
       pulseCount++;
       if (pulseCount % 2 == 0)
         stepCount++;
 
       togglePulse = !togglePulse;
       digitalWrite(stepPin, togglePulse);
-      deltaTime = currentTime;
+      lastPulseTime = currentTime;
     }
   }
 
-  void changeSpeed(uint64_t _speed) { stepTime = _speed; }
+  void changeSpeed(double _speed) {
+    // RPM to stepTime
+    const double stepAngle = 1.8; // Step angle in degrees
+    const double stepsPerRevolution = 360.f / stepAngle;
+    const uint8_t microsteps = 1;  // 1, 2, 4, 8, 16
+    const double minPulseDuration = 1.9; // Minimum step pulse duration in microseconds
+
+    double stepsPerSecond = (_speed * stepsPerRevolution) / 60.0;
+    float microstepDuration = minPulseDuration / microsteps;
+    stepTime = 1e6 / (stepsPerSecond * microstepDuration);
+
+    static uint64_t updateTime = millis() + 100;
+    if (millis() > updateTime) {
+      updateTime += 100;
+      Serial.print(_speed);
+      Serial.print('\t');
+      Serial.println(stepTime);
+    }
+  }
 
   void changeDirection(bool _direction) { direction = _direction; }
 
   uint64_t steps(void) { return stepCount; }
 
 private:
-  uint64_t stepTime, deltaTime, currentTime;
-  uint64_t pulseCount = 0;
-  uint64_t stepCount = 0;
+  uint64_t stepTime, lastPulseTime = 0, currentTime;
+  uint64_t pulseCount = 0, stepCount = 0;
   int32_t stepPin, dirPin;
   bool direction, togglePulse, enable;
 };
@@ -70,8 +87,8 @@ void InitLED();
 
 void ReadIMU(IMU_Data&);
 void UpdateMotorValues(IMU_Data&);
-double CalculateAngle(IMU_Data&, unsigned long);
-double ComputePID(double, unsigned long);
+double CalculateAngle(IMU_Data&);
+double ComputePID(double&);
 void RunMotors();
 void UpdateLED();
 
@@ -95,12 +112,17 @@ void loop() {
 }
 
 void InitMotors() {
-  motor_L.init(STEP_PIN_1, DIR_PIN_1, 1000, HIGH);
-  motor_R.init(STEP_PIN_2, DIR_PIN_2, 1000, HIGH);
+  motor_L.init(STEP_PIN_1, DIR_PIN_1, 1.9, HIGH);
+  motor_R.init(STEP_PIN_2, DIR_PIN_2, 1000000, HIGH);
   motor_L.start();
   motor_R.start();
 
-  Serial.println("Motors Initialized!");
+  // Serial.println("Motors Initialized!");
+  Serial.print("accAngle");
+  Serial.print('\t');
+  Serial.print("gyroAngle");
+  Serial.print('\t');
+  Serial.println("calculatedAngle");
 }
 
 void InitIMU() {
@@ -150,48 +172,67 @@ void ReadIMU(IMU_Data& data) {
 }
 
 void UpdateMotorValues(IMU_Data& data) {
-  // Loop Time Calculation
-  unsigned long currTime = millis();
-  static unsigned long prevTime = currTime;  // declare and initially assign prevTime to currTime
-  unsigned long dt = currTime - prevTime; 
-  prevTime = currTime;  // update prevTime to currTime
+  double calculatedAngle = CalculateAngle(data);
 
-  // Calculate Angle
-  double calculatedAngle = CalculateAngle(data, dt);
+  double motorSpeed = ComputePID(calculatedAngle);
 
-  // Output for Motors
-  double controlOutput = ComputePID(calculatedAngle, dt);
+  motor_L.changeSpeed(abs(motorSpeed));
+  motor_R.changeSpeed(abs(motorSpeed));
 
-  motor_L.changeSpeed(abs(controlOutput));
-  motor_R.changeSpeed(abs(controlOutput));
-
-  motor_L.changeDirection((controlOutput < 0) ? 0 : 1);
-  motor_R.changeDirection((controlOutput < 0) ? 0 : 1);
+  motor_L.changeDirection((motorSpeed < 0) ? 0 : 1);
+  motor_R.changeDirection((motorSpeed < 0) ? 0 : 1);
 }
 
-double CalculateAngle(IMU_Data& data, unsigned long dt) {  
+double CalculateAngle(IMU_Data& data) {  
+  // Loop Time Calculation
+  uint64_t currTime = millis();
+  static uint64_t prevTime = currTime;  // declare and initially assign prevTime to currTime
+  uint64_t dt = currTime - prevTime; 
+  prevTime = currTime;  // update prevTime to currTime
+
+  // Angle Variables
+  static float calculatedAngle = 0;
+
   // Two Angle Calculation Methods
   float accAngle = atan2(data.ay, data.az) * RAD_TO_DEG;
-  float gyroRate = (data.gx + 0.12);  // -0.12 is steady state error
+  float gyroAngle = calculatedAngle + (data.gx + 0.12) * dt / 1000;  // -0.12 is steady state error
 
   // Complementary Filter Factors
   static const double tau = 0.5;  // effective filter time (0.5s)
   double a = tau / (tau + (double)dt / 1000.0);
   
   // Complementary Filtered Angle (high pass filter on gyro; low pass filter on acc)
-  static float calculatedAngle = 0;
-  calculatedAngle = a * (calculatedAngle + gyroRate * dt / 1000) + (1-a) * accAngle;
+  calculatedAngle = a * gyroAngle + (1-a) * accAngle;
+
+  // static uint64_t printTime = millis() + 100;
+  // if (millis() > printTime) {
+  //   printTime += 100;
+  //   Serial.print(accAngle);
+  //   Serial.print('\t');
+  //   Serial.print(gyroAngle);
+  //   Serial.print('\t');
+  //   Serial.print(calculatedAngle);
+  //   Serial.print('\t');
+  // }
+
   return calculatedAngle;
 }
 
-double ComputePID(double calculatedAngle, unsigned long dt) {
+double ComputePID(double& calculatedAngle) {
+  // Loop Time Calculation
+  uint64_t currTime = millis();
+  static uint64_t prevTime = currTime;  // declare and initially assign prevTime to currTime
+  uint64_t dt = currTime - prevTime; 
+  double dt_s = (double)dt / 1000.0;
+  prevTime = currTime;  // update prevTime to currTime
+
   // PID constants
-  static const double Kp = 40.0;
-  static const double Ki = 40.0;
-  static const double Kd = 0.05;
+  static const double Kp = 12.0;
+  static const double Ki = 0.0;
+  static const double Kd = 0.0;
 
   // Target angles
-  static const double targetAngle = 1.31;
+  static const double targetAngle = -4;
 
   // Variables for PID control
   static double previousError = 0.0;
@@ -203,17 +244,29 @@ double ComputePID(double calculatedAngle, unsigned long dt) {
   double proportional = Kp * error;
 
   // Integral term
-  integral += Ki * error * dt;
-  integral = constrain(integral, -300 / Ki / dt, 300 / Ki / dt);
+  integral += Ki * error * dt_s;
+  integral = constrain(integral, -50, 50);
 
   // Derivative term
-  double derivative = Kd * (error - previousError) / dt;
+  double derivative = Kd * (error - previousError) / dt_s;
   previousError = error;
 
   // Compute the PID output
-  double output = proportional + integral - derivative;
+  double output = proportional + integral + derivative;
 
-  return constrain(output, -255, 255);
+  // static uint64_t printTime = millis() + 100;
+  // if (millis() > printTime) {
+  //   printTime += 100;
+  //   Serial.print(proportional);
+  //   Serial.print('\t');
+  //   Serial.print(integral);
+  //   Serial.print('\t');
+  //   Serial.print(derivative);
+  //   Serial.print('\t');
+  //   Serial.println(output);
+  // }
+
+  return output;
 }
 
 void RunMotors() {
