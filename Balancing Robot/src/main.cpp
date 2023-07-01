@@ -70,7 +70,8 @@ void InitLED();
 
 void ReadIMU(IMU_Data&);
 void UpdateMotorValues(IMU_Data&);
-double ComputePID(double);
+double CalculateAngle(IMU_Data&, unsigned long);
+double ComputePID(double, unsigned long);
 void RunMotors();
 void UpdateLED();
 
@@ -149,21 +150,17 @@ void ReadIMU(IMU_Data& data) {
 }
 
 void UpdateMotorValues(IMU_Data& data) {
+  // Loop Time Calculation
   unsigned long currTime = millis();
-  static unsigned long prevTime = currTime;
-  unsigned long loopTime = currTime - prevTime;
-  prevTime = currTime;
-  
-  float accAngle = atan2(data.ay, data.az) * RAD_TO_DEG;
+  static unsigned long prevTime = currTime;  // declare and initially assign prevTime to currTime
+  unsigned long dt = currTime - prevTime; 
+  prevTime = currTime;  // update prevTime to currTime
 
-  float gyroRate = (data.gx + 0.12);
-  
-  static const double tau = 0.5;  // effective filter time (0.5s)
-  double a = tau / (tau + (double)loopTime / 1000.0);
-  static float calculatedAngle = 0;
-  calculatedAngle = a * (calculatedAngle + gyroRate * loopTime / 1000) + (1-a) * accAngle;  // high pass filter on gyro; low pass filter on acc
+  // Calculate Angle
+  double calculatedAngle = CalculateAngle(data, dt);
 
-  double controlOutput = ComputePID(calculatedAngle);
+  // Output for Motors
+  double controlOutput = ComputePID(calculatedAngle, dt);
 
   motor_L.changeSpeed(abs(controlOutput));
   motor_R.changeSpeed(abs(controlOutput));
@@ -172,14 +169,29 @@ void UpdateMotorValues(IMU_Data& data) {
   motor_R.changeDirection((controlOutput < 0) ? 0 : 1);
 }
 
-double ComputePID(double calculatedAngle) {
+double CalculateAngle(IMU_Data& data, unsigned long dt) {  
+  // Two Angle Calculation Methods
+  float accAngle = atan2(data.ay, data.az) * RAD_TO_DEG;
+  float gyroRate = (data.gx + 0.12);  // -0.12 is steady state error
+
+  // Complementary Filter Factors
+  static const double tau = 0.5;  // effective filter time (0.5s)
+  double a = tau / (tau + (double)dt / 1000.0);
+  
+  // Complementary Filtered Angle (high pass filter on gyro; low pass filter on acc)
+  static float calculatedAngle = 0;
+  calculatedAngle = a * (calculatedAngle + gyroRate * dt / 1000) + (1-a) * accAngle;
+  return calculatedAngle;
+}
+
+double ComputePID(double calculatedAngle, unsigned long dt) {
   // PID constants
-  static const double Kp = 2.0;
-  static const double Ki = 0.5;
-  static const double Kd = 1.0;
+  static const double Kp = 40.0;
+  static const double Ki = 40.0;
+  static const double Kd = 0.05;
 
   // Target angles
-  static const double targetAngle = 0.0;  // TODO: allow for non vertical steady state
+  static const double targetAngle = 1.31;
 
   // Variables for PID control
   static double previousError = 0.0;
@@ -191,16 +203,17 @@ double ComputePID(double calculatedAngle) {
   double proportional = Kp * error;
 
   // Integral term
-  integral += Ki * error;
+  integral += Ki * error * dt;
+  integral = constrain(integral, -300 / Ki / dt, 300 / Ki / dt);
 
   // Derivative term
-  double derivative = Kd * (error - previousError);
+  double derivative = Kd * (error - previousError) / dt;
   previousError = error;
 
   // Compute the PID output
-  double output = proportional + derivative;  // + integral;
+  double output = proportional + integral - derivative;
 
-  return output;
+  return constrain(output, -255, 255);
 }
 
 void RunMotors() {
