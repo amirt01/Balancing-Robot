@@ -13,11 +13,9 @@ public:
   
   void start(void) { enable = true; }
   
-  void init(int _stepPin, int _dirPin, uint64_t _stepTime, bool _direction) {
+  void init(int _stepPin, int _dirPin) {
     stepPin     = _stepPin;
     dirPin      = _dirPin;
-    stepTime    = _stepTime;
-    direction   = _direction;
 
     togglePulse = LOW;
     enable      = false;
@@ -28,48 +26,53 @@ public:
 
   void run(void) {
     currentTime = micros();
-    digitalWrite(dirPin, direction);
-    if (!enable) return;
-    if ((currentTime - lastPulseTime) > stepTime) {
-      pulseCount++;
-      if (pulseCount % 2 == 0)
-        stepCount++;
+    if (!enable) return;  // exit if dissabled
+    else if (!togglePulse && (currentTime - lastPulseTime))  // low pulse for only 1 microsecond
+      togglePulse = HIGH;
+    else if (togglePulse && (currentTime - lastPulseTime) > stepTime)  // high pulse for step durration
+      togglePulse = LOW;
+    else return;  // return if not ready for a pulse
 
-      togglePulse = !togglePulse;
-      digitalWrite(stepPin, togglePulse);
-      lastPulseTime = currentTime;
-    }
+    pulseCount++;
+    if (pulseCount % 2 == 0)
+      stepCount++;
+
+    digitalWrite(dirPin, direction);
+    digitalWrite(stepPin, togglePulse);
+    lastPulseTime = currentTime;
   }
 
-  void changeSpeed(double _speed) {
+  // takes in speed as rpm and sets the step pulse durration in microseconds
+  void changeSpeed(const double _speed) {
     // RPM to stepTime
     const double stepAngle = 1.8; // Step angle in degrees
-    const double stepsPerRevolution = 360.f / stepAngle;
     const uint8_t microsteps = 1;  // 1, 2, 4, 8, 16
-    const double minPulseDuration = 1.9; // Minimum step pulse duration in microseconds
+    const double stepsPerRevolution = 360.f / stepAngle * microsteps;
+    const double minPulseDuration = 1; // Minimum step pulse duration in microseconds
 
-    double stepsPerSecond = (_speed * stepsPerRevolution) / 60.0;
-    float microstepDuration = minPulseDuration / microsteps;
-    stepTime = 1e6 / (stepsPerSecond * microstepDuration);
+    stepTime = 6e7 / (_speed * stepsPerRevolution);  // 6e7 for minutes to microseconds
 
-    static uint64_t updateTime = millis() + 100;
-    if (millis() > updateTime) {
-      updateTime += 100;
-      Serial.print(_speed);
-      Serial.print('\t');
-      Serial.println(stepTime);
-    }
+    if (stepTime < minPulseDuration)
+      stepTime = minPulseDuration;
+
+    // static uint64_t updateTime = millis() + 100;
+    // if (millis() > updateTime) {
+    //   updateTime += 100;
+    //   Serial.print(_speed);
+    //   Serial.print('\t|\t');
+    //   Serial.println(stepTime);
+    // }
   }
 
-  void changeDirection(bool _direction) { direction = _direction; }
+  void changeDirection(const bool _direction) { direction = _direction; }
 
   uint64_t steps(void) { return stepCount; }
 
 private:
-  uint64_t stepTime, lastPulseTime = 0, currentTime;
-  uint64_t pulseCount = 0, stepCount = 0;
+  uint64_t stepTime = 0, lastPulseTime = 0, currentTime;
+  uint64_t pulseCount = 0, stepCount = 0;  // pulses keeps track of high and low pulses while steps keeps track of high pulses
   int32_t stepPin, dirPin;
-  bool direction, togglePulse, enable;
+  bool direction = 0, togglePulse, enable;
 };
 
 struct IMU_Data{
@@ -85,9 +88,9 @@ void InitMotors();
 void InitIMU();
 void InitLED();
 
-void ReadIMU(IMU_Data&);
-void UpdateMotorValues(IMU_Data&);
-double CalculateAngle(IMU_Data&);
+void ReadIMU(IMU_Data*);
+void UpdateMotorValues(const IMU_Data&);
+double CalculateAngle(const IMU_Data&);
 double ComputePID(double&);
 void RunMotors();
 void UpdateLED();
@@ -103,7 +106,7 @@ void setup() {
 
 void loop() {
   static IMU_Data data;
-  ReadIMU(data);  
+  ReadIMU(&data);  
 
   UpdateMotorValues(data);
   RunMotors();
@@ -112,8 +115,8 @@ void loop() {
 }
 
 void InitMotors() {
-  motor_L.init(STEP_PIN_1, DIR_PIN_1, 1.9, HIGH);
-  motor_R.init(STEP_PIN_2, DIR_PIN_2, 1000000, HIGH);
+  motor_L.init(STEP_PIN_1, DIR_PIN_1);
+  motor_R.init(STEP_PIN_2, DIR_PIN_2);
   motor_L.start();
   motor_R.start();
 
@@ -148,30 +151,30 @@ void InitLED() {
   blinkTime = millis() + 500UL;
 }
 
-void ReadIMU(IMU_Data& data) {
+void ReadIMU(IMU_Data* data) {
   if (IMU.accelerationAvailable()) {
-    IMU.readAcceleration(data.ax, data.ay, data.az);
+    IMU.readAcceleration(data->ax, data->ay, data->az);
 
-    // Serial.print(data.ax);
+    // Serial.print(data->ax);
     // Serial.print('\t');
-    // Serial.print(data.ay);
+    // Serial.print(data->ay);
     // Serial.print('\t');
-    // Serial.print(data.az);
+    // Serial.print(data->az);
     // Serial.print('\t');
   }
   
   if (IMU.gyroscopeAvailable()) {
-    IMU.readGyroscope(data.gx, data.gy, data.gz);
+    IMU.readGyroscope(data->gx, data->gy, data->gz);
 
-    // Serial.print(data.gx);
+    // Serial.print(data->gx);
     // Serial.print('\t');
-    // Serial.print(data.gy);
+    // Serial.print(data->gy);
     // Serial.print('\t');
-    // Serial.print(data.gz);
+    // Serial.print(data->gz);
   }
 }
 
-void UpdateMotorValues(IMU_Data& data) {
+void UpdateMotorValues(const IMU_Data& data) {
   double calculatedAngle = CalculateAngle(data);
 
   double motorSpeed = ComputePID(calculatedAngle);
@@ -183,7 +186,7 @@ void UpdateMotorValues(IMU_Data& data) {
   motor_R.changeDirection((motorSpeed < 0) ? 0 : 1);
 }
 
-double CalculateAngle(IMU_Data& data) {  
+double CalculateAngle(const IMU_Data& data) {  
   // Loop Time Calculation
   uint64_t currTime = millis();
   static uint64_t prevTime = currTime;  // declare and initially assign prevTime to currTime
@@ -229,7 +232,7 @@ double ComputePID(double& calculatedAngle) {
   // PID constants
   static const double Kp = 12.0;
   static const double Ki = 0.0;
-  static const double Kd = 0.0;
+  static const double Kd = -0.0;
 
   // Target angles
   static const double targetAngle = -4;
