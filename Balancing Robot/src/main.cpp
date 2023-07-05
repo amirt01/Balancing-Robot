@@ -27,7 +27,7 @@ public:
   void run(void) {
     currentTime = micros();
     if (!enable) return;  // exit if dissabled
-    else if (!togglePulse && (currentTime - lastPulseTime) >= 1)  // low pulse for only 1 microsecond
+    else if (!togglePulse && (currentTime - lastPulseTime) >= 2)  // low pulse for only 1 microsecond
       togglePulse = HIGH;
     else if (togglePulse && (currentTime - lastPulseTime) >= stepTime)  // high pulse for step durration
       togglePulse = LOW;
@@ -46,7 +46,7 @@ public:
   void changeSpeed(const double _speed) {
     // RPM to stepTime
     const double stepAngle = 1.8; // Step angle in degrees
-    const uint8_t microsteps = 1;  // 1, 2, 4, 8, 16
+    const uint8_t microsteps = 16;  // 1, 2, 4, 8, 16
     const double stepsPerRevolution = 360.f / stepAngle * microsteps;
     const double minPulseDuration = 1; // Minimum step pulse duration in microseconds
 
@@ -55,13 +55,13 @@ public:
     if (stepTime < minPulseDuration)
       stepTime = minPulseDuration;
 
-    // static uint64_t updateTime = millis() + 100;
-    // if (millis() > updateTime) {
-    //   updateTime += 100;
-    //   Serial.print(_speed);
-    //   Serial.print('\t|\t');
-    //   Serial.println(stepTime);
-    // }
+    static uint64_t updateTime = millis() + 100;
+    if (millis() > updateTime) {
+      updateTime += 100;
+      Serial.print(_speed);
+      Serial.print('\t');
+      Serial.println(stepTime);
+    }
   }
 
   void changeDirection(const bool _direction) { direction = _direction; }
