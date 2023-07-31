@@ -1,147 +1,114 @@
 #include <Arduino.h>
 #include <Arduino_LSM6DS3.h>
 #include <WiFiNINA.h>
+#include "DRV8825.h"
 
-#define DIR_PIN_1 A1
-#define STEP_PIN_1 A0
-#define DIR_PIN_2 A2
-#define STEP_PIN_2 A3
+#define DEBUG false
 
-class Motor{
-public:
-  void stop(void) { enable = false; }
-  
-  void start(void) { enable = true; }
-  
-  void init(int _stepPin, int _dirPin) {
-    stepPin     = _stepPin;
-    dirPin      = _dirPin;
+#define MOTOR_STEPS 200
 
-    togglePulse = LOW;
-    enable      = false;
+#define DIR_PIN_1 2
+#define STEP_PIN_1 3
+#define MODE0_1 6
+#define MODE1_1 5
+#define MODE2_1 4
 
-    pinMode(stepPin, OUTPUT);
-    pinMode(dirPin, OUTPUT);
-  }
+#define DIR_PIN_2 7
+#define STEP_PIN_2 8
+#define MODE0_2 11
+#define MODE1_2 10
+#define MODE2_2 9
 
-  void run(void) {
-    currentTime = micros();
-    if (!enable) return;  // exit if dissabled
-    else if (!togglePulse && (currentTime - lastPulseTime) >= 2)  // low pulse for only 1 microsecond
-      togglePulse = HIGH;
-    else if (togglePulse && (currentTime - lastPulseTime) >= stepTime)  // high pulse for step durration
-      togglePulse = LOW;
-    else return;  // return if not ready for a pulse
+DRV8825 stepper1(MOTOR_STEPS, DIR_PIN_1, STEP_PIN_1, MODE0_1, MODE1_1, MODE2_1);
+DRV8825 stepper2(MOTOR_STEPS, DIR_PIN_2, STEP_PIN_2, MODE0_2, MODE1_2, MODE2_2);
 
-    pulseCount++;
-    if (pulseCount % 2 == 0)
-      stepCount++;
+static const double targetAngle = -3.5;
 
-    digitalWrite(dirPin, direction);
-    digitalWrite(stepPin, togglePulse);
-    lastPulseTime = currentTime;
-  }
-
-  // takes in speed as rpm and sets the step pulse durration in microseconds
-  void changeSpeed(const double _speed) {
-    // RPM to stepTime
-    const double stepAngle = 1.8; // Step angle in degrees
-    const uint8_t microsteps = 16;  // 1, 2, 4, 8, 16
-    const double stepsPerRevolution = 360.f / stepAngle * microsteps;
-    const double minPulseDuration = 1; // Minimum step pulse duration in microseconds
-
-    stepTime = 6e7 / (_speed * stepsPerRevolution);  // 6e7 for minutes to microseconds
-
-    if (stepTime < minPulseDuration)
-      stepTime = minPulseDuration;
-
-    static uint64_t updateTime = millis() + 100;
-    if (millis() > updateTime) {
-      updateTime += 100;
-      Serial.print(_speed);
-      Serial.print('\t');
-      Serial.println(stepTime);
-    }
-  }
-
-  void changeDirection(const bool _direction) { direction = _direction; }
-
-  uint64_t steps(void) { return stepCount; }
-
-private:
-  uint64_t stepTime = 0, lastPulseTime = 0, currentTime;
-  uint64_t pulseCount = 0, stepCount = 0;  // pulses keeps track of high and low pulses while steps keeps track of high pulses
-  int32_t stepPin, dirPin;
-  bool direction = 0, togglePulse, enable;
-};
-
-struct IMU_Data{
+struct IMU_Data {
   float ax, ay, az, gx, gy, gz;
 };
 
-Motor motor_L, motor_R;
-
 bool blinkMode;
-uint64_t blinkTime;
+uint32_t blinkTime;
 
-void InitMotors();
 void InitIMU();
+void InitMotors();
 void InitLED();
 
-void ReadIMU(IMU_Data*);
-void UpdateMotorValues(const IMU_Data&);
+IMU_Data ReadIMU();
 double CalculateAngle(const IMU_Data&);
-double ComputePID(double&);
-void RunMotors();
+double ComputePID(const double&);
+void UpdateMotors(const double&, const double&);
 void UpdateLED();
 
 void setup() {
-  Serial.begin(9600);
+// #if DEBUG
+  Serial.begin(115200);
+  delay(5000);
   Serial.println("Serial Initialized!");
+// #endif
 
-  InitMotors();
   InitIMU();
+  InitMotors();
   InitLED();
+
+#if DEBUG
+  Serial.println("Acceleration in g's | Gyroscope in degrees/second");
+  Serial.println("aX\taY\taZ | gX\tgY\tgZ");
+#endif
 }
 
 void loop() {
-  static IMU_Data data;
-  ReadIMU(&data);  
+  const IMU_Data data = ReadIMU();
 
-  UpdateMotorValues(data);
-  RunMotors();
+  const double calculatedAngle = CalculateAngle(data);
+
+  const double angleError = targetAngle - calculatedAngle;
+  const double speed = ComputePID(angleError);
+
+#if DEBUG
+  Serial.print(calculatedAngle);
+  Serial.print('\t');
+  Serial.print(speed);
+  Serial.print('\t');
+#endif
+  
+  UpdateMotors(abs(speed), angleError);
 
   UpdateLED();
 }
 
 void InitMotors() {
-  motor_L.init(STEP_PIN_1, DIR_PIN_1);
-  motor_R.init(STEP_PIN_2, DIR_PIN_2);
-  motor_L.start();
-  motor_R.start();
+  stepper1.begin();
+  stepper2.begin();
+  stepper1.enable();
+  stepper2.enable();
 
-  // Serial.println("Motors Initialized!");
-  Serial.print("accAngle");
-  Serial.print('\t');
-  Serial.print("gyroAngle");
-  Serial.print('\t');
-  Serial.println("calculatedAngle");
+#if DEBUG
+  Serial.println("Motors Initialized!");
+#endif
 }
 
 void InitIMU() {
   if (!IMU.begin()) {
-    Serial.println("Failed to initialize IMU!");
+#if DEBUG
+  Serial.println("Failed to initialize IMU!");
+#endif
+  } else {
+#if DEBUG
+  Serial.println("IMU Initialized!");
+#endif
   }
 
-  // Serial.print("Gyroscope sample rate = ");
-  // Serial.print(IMU.gyroscopeSampleRate());
-  // Serial.println(" Hz");
-  // Serial.print("Accelerometer sample rate = ");
-  // Serial.print(IMU.accelerationSampleRate());
-  // Serial.println(" Hz");
-  // Serial.println();
-  // Serial.println("Acceleration in g's | Gyroscope in degrees/second");
-  // Serial.println("aX\taY\taZ | gX\tgY\tgZ");
+#if DEBUG
+  Serial.print("Gyroscope sample rate = ");
+  Serial.print(IMU.gyroscopeSampleRate());
+  Serial.println(" Hz");
+  Serial.print("Accelerometer sample rate = ");
+  Serial.print(IMU.accelerationSampleRate());
+  Serial.println(" Hz");
+  Serial.println();
+#endif
 }
 
 void InitLED() {
@@ -151,39 +118,32 @@ void InitLED() {
   blinkTime = millis() + 500UL;
 }
 
-void ReadIMU(IMU_Data* data) {
+IMU_Data ReadIMU() {
+  static IMU_Data data{};
   if (IMU.accelerationAvailable()) {
-    IMU.readAcceleration(data->ax, data->ay, data->az);
-
-    // Serial.print(data->ax);
-    // Serial.print('\t');
-    // Serial.print(data->ay);
-    // Serial.print('\t');
-    // Serial.print(data->az);
-    // Serial.print('\t');
+    IMU.readAcceleration(data.ax, data.ay, data.az);
+  #if DEBUG
+    Serial.print(data.ax);
+    Serial.print('\t');
+    Serial.print(data.ay);
+    Serial.print('\t');
+    Serial.print(data.az);
+    Serial.print('\t');
+  #endif
   }
   
   if (IMU.gyroscopeAvailable()) {
-    IMU.readGyroscope(data->gx, data->gy, data->gz);
-
-    // Serial.print(data->gx);
-    // Serial.print('\t');
-    // Serial.print(data->gy);
-    // Serial.print('\t');
-    // Serial.print(data->gz);
+    IMU.readGyroscope(data.gx, data.gy, data.gz);
+  #if DEBUG
+    Serial.print(data.gx);
+    Serial.print('\t');
+    Serial.print(data.gy);
+    Serial.print('\t');
+    Serial.print(data.gz);
+  #endif
   }
-}
 
-void UpdateMotorValues(const IMU_Data& data) {
-  double calculatedAngle = CalculateAngle(data);
-
-  double motorSpeed = ComputePID(calculatedAngle);
-
-  motor_L.changeSpeed(abs(motorSpeed));
-  motor_R.changeSpeed(abs(motorSpeed));
-
-  motor_L.changeDirection((motorSpeed < 0) ? 0 : 1);
-  motor_R.changeDirection((motorSpeed < 0) ? 0 : 1);
+  return data;
 }
 
 double CalculateAngle(const IMU_Data& data) {  
@@ -207,21 +167,25 @@ double CalculateAngle(const IMU_Data& data) {
   // Complementary Filtered Angle (high pass filter on gyro; low pass filter on acc)
   calculatedAngle = a * gyroAngle + (1-a) * accAngle;
 
-  // static uint64_t printTime = millis() + 100;
-  // if (millis() > printTime) {
-  //   printTime += 100;
-  //   Serial.print(accAngle);
-  //   Serial.print('\t');
-  //   Serial.print(gyroAngle);
-  //   Serial.print('\t');
-  //   Serial.print(calculatedAngle);
-  //   Serial.print('\t');
-  // }
+#if DEBUG
+  static uint64_t printTime = millis() + 100;
+  if (millis() > printTime) {
+    printTime += 100;
+    Serial.print(accAngle);
+    Serial.print('\t');
+    Serial.print(gyroAngle);
+    Serial.print('\t');
+    Serial.print(calculatedAngle);
+    Serial.print('\t');
+  }
+#endif
 
   return calculatedAngle;
 }
 
-double ComputePID(double& calculatedAngle) {
+double ComputePID(const double& angleError) {
+  return 100;
+  
   // Loop Time Calculation
   uint64_t currTime = millis();
   static uint64_t prevTime = currTime;  // declare and initially assign prevTime to currTime
@@ -230,51 +194,51 @@ double ComputePID(double& calculatedAngle) {
   prevTime = currTime;  // update prevTime to currTime
 
   // PID constants
-  static const double Kp = 20.0;
-  static const double Ki = 6.0;
-  static const double Kd = -0.01;
-
-  // Target angles
-  static const double targetAngle = -3.5;
+  static const double Kp = 1;
+  static const double Ki = 0.0;
+  static const double Kd = 0.0;
 
   // Variables for PID control
   static double previousError = 0.0;
   static double integral = 0.0;
 
-  double error = targetAngle - calculatedAngle;
-
   // Proportional term
-  double proportional = Kp * error;
+  double proportional = Kp * angleError;
 
   // Integral term
-  integral += Ki * error * dt_s;
+  integral += Ki * angleError * dt_s;
   integral = constrain(integral, -50, 50);
 
   // Derivative term
-  double derivative = Kd * (error - previousError) / dt_s;
-  previousError = error;
+  double derivative = Kd * (angleError - previousError) / dt_s;
+  previousError = angleError;
 
   // Compute the PID output
   double output = proportional + integral + derivative;
 
-  // static uint64_t printTime = millis() + 100;
-  // if (millis() > printTime) {
-  //   printTime += 100;
-  //   Serial.print(proportional);
-  //   Serial.print('\t');
-  //   Serial.print(integral);
-  //   Serial.print('\t');
-  //   Serial.print(derivative);
-  //   Serial.print('\t');
-  //   Serial.println(output);
-  // }
+#if DEBUG
+  static uint64_t printTime = millis() + 100;
+  if (millis() > printTime) {
+    printTime += 100;
+    Serial.print(proportional);
+    Serial.print('\t');
+    Serial.print(integral);
+    Serial.print('\t');
+    Serial.print(derivative);
+    Serial.print('\t');
+    Serial.println(output);
+  }
+#endif
 
   return output;
 }
 
-void RunMotors() {
-  motor_L.run();
-  motor_R.run();
+void UpdateMotors(const double& speed, const double& angleError) {
+  stepper1.setRPM(speed);
+  stepper2.setRPM(speed);
+  
+  stepper1.startRotate(angleError);
+  stepper2.startRotate(angleError);
 }
 
 void UpdateLED() {
